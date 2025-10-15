@@ -71,4 +71,49 @@ if deposit_file and withdrawal_file:
             days = np.busday_count(last_deposit["deposit_date"].date(), w_date.date())
 
             all_withdrawals.append({
-                "Customer Na
+                "Customer Name": w_row["customer_name"],
+                "Account Number": acct,
+                "Deposit Date": last_deposit["deposit_date"].date(),
+                "Withdrawal Date": w_date.date(),
+                "Working Days": days,
+                "Deposit Amount": last_deposit["amount"],
+                "Withdrawal Amount": w_row["amount"],
+                "Early Withdrawal": days < 14
+            })
+
+        # === Handle empty result safely ===
+        if not all_withdrawals:
+            st.warning("⚠️ No matching withdrawals found for the uploaded deposits.")
+        else:
+            report_df = pd.DataFrame(all_withdrawals)
+
+            # === Step 3: Checkbox filter ===
+            st.subheader("🔍 Filter Option")
+            apply_rule = st.checkbox("✅ Show only early withdrawals (within 14 working days)", value=True)
+
+            if apply_rule:
+                display_df = report_df[report_df["Early Withdrawal"] == True]
+                st.success(f"✅ Showing {len(display_df)} early withdrawals (within 14 working days).")
+            else:
+                display_df = report_df
+                st.info(f"📋 Showing all {len(display_df)} withdrawals matched to deposits.")
+
+            # === Display Report ===
+            st.subheader("📄 Withdrawal Report")
+            st.dataframe(display_df, use_container_width=True)
+
+            # === Download Function ===
+            def to_excel(df):
+                output = BytesIO()
+                df.to_excel(output, index=False, engine="openpyxl")
+                return output.getvalue()
+
+            st.download_button(
+                label="⬇ Download Withdrawal Report",
+                data=to_excel(display_df),
+                file_name="withdrawal_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    except Exception as e:
+        st.error(f"❌ Error while processing: {e}")
