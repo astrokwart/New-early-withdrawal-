@@ -71,15 +71,4 @@ if deposit_file and withdrawal_file:
             days = np.busday_count(last_deposit["deposit_date"].date(), w_date.date())
 
             all_withdrawals.append({
-                "Customer Name": w_row["customer_name"],
-                "Account Number": acct,
-                "Deposit Date": last_deposit["deposit_date"].date(),
-                "Withdrawal Date": w_date.date(),
-                "Working Days": days,
-                "Deposit Amount": last_deposit["amount"],
-                "Withdrawal Amount": w_row["amount"],
-                "Early Withdrawal": days < 14
-            })
-
-        # === Handle empty result safely ===
-        if not all_with_
+                "Customer Na
