@@ -81,35 +81,5 @@ if deposit_file and withdrawal_file:
                 "Early Withdrawal": days < 14
             })
 
-        report_df = pd.DataFrame(all_withdrawals)
-
-        # === Step 3: Checkbox filter ===
-        st.subheader("🔍 Filter Option")
-        apply_rule = st.checkbox("✅ Show only early withdrawals (within 14 working days)", value=True)
-
-        if apply_rule:
-            display_df = report_df[report_df["Early Withdrawal"] == True]
-            st.success(f"✅ Showing {len(display_df)} early withdrawals (within 14 working days).")
-        else:
-            display_df = report_df
-            st.info(f"📋 Showing all {len(display_df)} withdrawals matched to deposits.")
-
-        # === Display Report ===
-        st.subheader("📄 Withdrawal Report")
-        st.dataframe(display_df, use_container_width=True)
-
-        # === Download Function ===
-        def to_excel(df):
-            output = BytesIO()
-            df.to_excel(output, index=False, engine="openpyxl")
-            return output.getvalue()
-
-        st.download_button(
-            label="⬇ Download Withdrawal Report",
-            data=to_excel(display_df),
-            file_name="withdrawal_report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    except Exception as e:
-        st.error(f"❌ Error while processing: {e}")
+        # === Handle empty result safely ===
+        if not all_with_
