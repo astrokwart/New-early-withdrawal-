@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from io import BytesIO
-import re
-from datetime import datetime, timedelta
+from datetime import timedelta
 import os
 
 # --- Page config ---
@@ -13,13 +11,20 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Custom styling ---
 st.markdown("""
 <style>
     .main { background-color: #f8fafc; }
-    .stDataFrame { border-radius: 10px; }
     .section-header {
         background: linear-gradient(90deg, #1e3a5f, #2563eb);
+        color: white;
+        padding: 10px 20px;
+        border-radius: 8px;
+        margin: 20px 0 10px 0;
+        font-weight: bold;
+        font-size: 16px;
+    }
+    .dep-header {
+        background: linear-gradient(90deg, #065f46, #059669);
         color: white;
         padding: 10px 20px;
         border-radius: 8px;
@@ -32,10 +37,9 @@ st.markdown("""
 
 st.title("💰 Early Withdrawal Checker")
 st.markdown("Upload your **raw bank statement CSV files** — the app will process and match them automatically.")
-
 st.divider()
 
-# --- Logic mode toggle ---
+# --- Logic toggle ---
 st.markdown("### ⚙️ Matching Logic")
 lcol1, lcol2 = st.columns([1, 2])
 with lcol1:
@@ -233,25 +237,48 @@ def to_excel_download(df):
     return output.getvalue()
 
 
+def read_file(f):
+    if f.name.endswith(".csv"):
+        return pd.read_csv(f, header=None)
+    else:
+        return pd.read_excel(f, header=None)
+
+
 # ==============================================================
 # FILE UPLOAD SECTION
 # ==============================================================
 
 st.markdown("### 📁 Upload Raw Files")
 
-deposit_file = st.file_uploader("📥 Raw Deposits CSV", type=["csv", "xlsx"])
+# --- Deposit files ---
+st.markdown("#### 📥 Deposit Files")
+num_deposits = st.number_input(
+    "How many deposit files do you want to upload?",
+    min_value=1, max_value=20, value=1, step=1, key="num_dep"
+)
+deposit_files = []
+dep_cols = st.columns(min(int(num_deposits), 3))
+for idx in range(int(num_deposits)):
+    col = dep_cols[idx % min(int(num_deposits), 3)]
+    with col:
+        df_up = st.file_uploader(
+            f"📥 Deposit File {idx + 1}",
+            type=["csv", "xlsx"],
+            key=f"dep_file_{idx}"
+        )
+        deposit_files.append(df_up)
+
+uploaded_deposit_files = [f for f in deposit_files if f is not None]
 
 st.markdown("#### 📤 Withdrawal Files")
 num_withdrawals = st.number_input(
     "How many withdrawal files do you want to upload?",
-    min_value=1, max_value=20, value=1, step=1
+    min_value=1, max_value=20, value=1, step=1, key="num_wit"
 )
-
 withdrawal_files = []
-num_cols = min(int(num_withdrawals), 3)
-cols = st.columns(num_cols)
+wit_cols = st.columns(min(int(num_withdrawals), 3))
 for idx in range(int(num_withdrawals)):
-    col = cols[idx % num_cols]
+    col = wit_cols[idx % min(int(num_withdrawals), 3)]
     with col:
         wf = st.file_uploader(
             f"📤 Withdrawal File {idx + 1}",
@@ -268,59 +295,61 @@ st.divider()
 # PROCESSING
 # ==============================================================
 
+total_dep_needed = int(num_deposits)
+total_wit_needed = int(num_withdrawals)
 all_uploads_ready = (
-    deposit_file is not None and
-    len(uploaded_withdrawal_files) == int(num_withdrawals)
+    len(uploaded_deposit_files) == total_dep_needed and
+    len(uploaded_withdrawal_files) == total_wit_needed
 )
 
-if deposit_file is not None and len(uploaded_withdrawal_files) < int(num_withdrawals):
-    st.info(f"⬆️ {len(uploaded_withdrawal_files)}/{int(num_withdrawals)} withdrawal file(s) uploaded. Please upload the remaining file(s) to begin.")
+if not all_uploads_ready:
+    msgs = []
+    if len(uploaded_deposit_files) < total_dep_needed:
+        msgs.append(f"{len(uploaded_deposit_files)}/{total_dep_needed} deposit file(s)")
+    if len(uploaded_withdrawal_files) < total_wit_needed:
+        msgs.append(f"{len(uploaded_withdrawal_files)}/{total_wit_needed} withdrawal file(s)")
+    st.info(f"⬆️ Uploaded: {' | '.join(msgs)}. Please upload all files to begin.")
 
 if all_uploads_ready:
-    deposit_name = get_file_label(deposit_file)
-
     with st.spinner("Processing raw files..."):
 
-        # Process deposits
-        try:
-            if deposit_file.name.endswith(".csv"):
-                raw_dep = pd.read_csv(deposit_file, header=None)
-            else:
-                raw_dep = pd.read_excel(deposit_file, header=None)
-            processed_deposits = process_raw_deposits(raw_dep)
-        except Exception as e:
-            st.error(f"Error reading deposits file: {e}")
-            st.stop()
+        # Process each deposit file
+        deposit_results = []
+        for df_up in uploaded_deposit_files:
+            try:
+                raw_dep = read_file(df_up)
+                processed_dep = process_raw_deposits(raw_dep)
+                deposit_results.append((get_file_label(df_up), processed_dep))
+            except Exception as e:
+                st.error(f"Error reading deposit file '{df_up.name}': {e}")
+                st.stop()
 
-        # Process each withdrawal file separately
+        # Process each withdrawal file
         withdrawal_results = []
         for wf in uploaded_withdrawal_files:
             try:
-                if wf.name.endswith(".csv"):
-                    raw_wit = pd.read_csv(wf, header=None)
-                else:
-                    raw_wit = pd.read_excel(wf, header=None)
+                raw_wit = read_file(wf)
                 processed_wit = process_raw_withdrawals(raw_wit)
                 withdrawal_results.append((get_file_label(wf), processed_wit))
             except Exception as e:
                 st.error(f"Error reading withdrawal file '{wf.name}': {e}")
                 st.stop()
 
-        # Combined withdrawals
-        processed_withdrawals = pd.concat(
-            [df for _, df in withdrawal_results], ignore_index=True
-        ) if withdrawal_results else pd.DataFrame()
+        # Combined deposits and withdrawals
+        all_deposits = pd.concat([df for _, df in deposit_results], ignore_index=True)
+        all_withdrawals = pd.concat([df for _, df in withdrawal_results], ignore_index=True)
 
-        # Generate report per withdrawal file
-        per_file_reports = {}
-        for wit_name, wit_df in withdrawal_results:
+        # Generate one report per DEPOSIT file (named after deposit)
+        # Each deposit report matches that deposit's data against ALL withdrawals
+        per_deposit_reports = {}
+        for dep_name, dep_df in deposit_results:
             if use_macro_logic:
-                report = match_macro_logic(processed_deposits, wit_df)
+                report = match_macro_logic(dep_df, all_withdrawals)
             else:
-                report = match_original_logic(processed_deposits, wit_df)
-            per_file_reports[wit_name] = report
+                report = match_original_logic(dep_df, all_withdrawals)
+            per_deposit_reports[dep_name] = report
 
-        combined_report = pd.concat(per_file_reports.values(), ignore_index=True) if per_file_reports else pd.DataFrame()
+        combined_report = pd.concat(per_deposit_reports.values(), ignore_index=True) if per_deposit_reports else pd.DataFrame()
 
     st.success("✅ Files processed successfully!")
 
@@ -330,8 +359,8 @@ if all_uploads_ready:
     no_match_count = len(combined_report[combined_report["Status"] == "No Match"])
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("📥 Deposits", len(processed_deposits))
-    m2.metric("📤 Withdrawals", len(processed_withdrawals))
+    m1.metric("📥 Total Deposits", len(all_deposits))
+    m2.metric("📤 Total Withdrawals", len(all_withdrawals))
     m3.metric("⚠️ Early Withdrawals", early_count)
     m4.metric("✅ Normal", normal_count)
     m5.metric("❓ No Match", no_match_count)
@@ -341,22 +370,23 @@ if all_uploads_ready:
 
     st.divider()
 
-    # Processed Deposits (named after file)
-    st.markdown(f'<div class="section-header">📥 Processed Deposits — {deposit_name}</div>', unsafe_allow_html=True)
-    st.dataframe(processed_deposits, use_container_width=True)
+    # --- Show processed deposits (one section per file) ---
+    for dep_name, dep_df in deposit_results:
+        st.markdown(f'<div class="dep-header">📥 Processed Deposits — {dep_name}</div>', unsafe_allow_html=True)
+        st.dataframe(dep_df, use_container_width=True)
 
-    # Processed Withdrawals (one section per file)
+    # --- Show processed withdrawals (one section per file) ---
     for wit_name, wit_df in withdrawal_results:
         st.markdown(f'<div class="section-header">📤 Processed Withdrawals — {wit_name}</div>', unsafe_allow_html=True)
         st.dataframe(wit_df, use_container_width=True)
 
     st.divider()
 
-    # Report per withdrawal file
+    # --- Reports named after each deposit file ---
     st.markdown("### 📊 Early Withdrawal Reports")
-    for wit_name, report_df in per_file_reports.items():
+    for dep_name, report_df in per_deposit_reports.items():
         st.markdown(
-            f'<div class="section-header">📊 {deposit_name} vs {wit_name}</div>',
+            f'<div class="dep-header">📊 Report — {dep_name}</div>',
             unsafe_allow_html=True
         )
         early_df = report_df[report_df["Status"] == "EARLY WITHDRAWAL"]
@@ -368,47 +398,50 @@ if all_uploads_ready:
         st.dataframe(report_df.style.apply(highlight_status, axis=1), use_container_width=True)
 
         if not early_df.empty:
-            st.markdown(f"**⚠️ Early Withdrawals Only — {wit_name}**")
+            st.markdown(f"**⚠️ Early Withdrawals Only — {dep_name}**")
             st.dataframe(early_df, use_container_width=True)
         else:
-            st.info(f"No early withdrawals found for {wit_name}.")
+            st.info(f"No early withdrawals found for {dep_name}.")
+
+        # Download for this deposit file
+        dep_sheets = {
+            f"Report - {dep_name}"[:31]: report_df,
+            f"Early - {dep_name}"[:31]: early_df,
+        }
+        st.download_button(
+            label=f"📘 Download Report — {dep_name}",
+            data=to_excel_multi_sheet(dep_sheets),
+            file_name=f"report_{dep_name}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"dl_dep_{dep_name}"
+        )
 
         st.divider()
 
-    # Download section
-    st.markdown("### 📥 Download Reports")
-
+    # --- Combined download ---
+    st.markdown("### 📥 Download All Reports")
     all_sheets = {}
-    all_sheets[f"Deposits - {deposit_name}"[:31]] = processed_deposits
+    for dep_name, dep_df in deposit_results:
+        all_sheets[f"Dep - {dep_name}"[:31]] = dep_df
     for wit_name, wit_df in withdrawal_results:
         all_sheets[f"Wit - {wit_name}"[:31]] = wit_df
-    for wit_name, report_df in per_file_reports.items():
-        all_sheets[f"Report - {wit_name}"[:31]] = report_df
+    for dep_name, report_df in per_deposit_reports.items():
+        all_sheets[f"Report - {dep_name}"[:31]] = report_df
     all_early = combined_report[combined_report["Status"] == "EARLY WITHDRAWAL"]
     all_sheets["All Early Withdrawals"] = all_early
 
-    dl1, dl2, dl3 = st.columns(3)
+    dl1, dl2 = st.columns(2)
     with dl1:
         st.download_button(
             label="📘 Full Report (All Sheets)",
             data=to_excel_multi_sheet(all_sheets),
-            file_name=f"withdrawal_report_{deposit_name}.xlsx",
+            file_name="full_withdrawal_report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     with dl2:
         st.download_button(
             label="⚠️ All Early Withdrawals",
             data=to_excel_download(all_early),
-            file_name=f"early_withdrawals_{deposit_name}.xlsx",
+            file_name="all_early_withdrawals.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    with dl3:
-        st.download_button(
-            label="📥 Processed Deposits",
-            data=to_excel_download(processed_deposits),
-            file_name=f"processed_deposits_{deposit_name}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-elif deposit_file is None:
-    st.info("⬆️ Please upload your raw deposits file and withdrawal file(s) to begin.")
