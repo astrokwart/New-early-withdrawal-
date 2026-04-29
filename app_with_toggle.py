@@ -4,6 +4,7 @@ import numpy as np
 from io import BytesIO
 import re
 from datetime import datetime, timedelta
+import os
 
 # --- Page config ---
 st.set_page_config(
@@ -25,13 +26,6 @@ st.markdown("""
         margin: 20px 0 10px 0;
         font-weight: bold;
         font-size: 16px;
-    }
-    .metric-card {
-        background: white;
-        border-radius: 10px;
-        padding: 15px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -59,26 +53,23 @@ st.divider()
 # HELPER FUNCTIONS
 # ==============================================================
 
+def get_file_label(file):
+    return os.path.splitext(file.name)[0] if file else "Unknown"
+
+
 def process_raw_deposits(df):
-    """Extract txn rows from raw deposit CSV and return clean dataframe."""
     records = []
     total_rows = len(df)
-
     for i in range(total_rows - 1):
         cell_b = str(df.iloc[i, 1]).strip() if pd.notna(df.iloc[i, 1]) else ""
-
         if cell_b.lower() == "txn":
             value_date = df.iloc[i, 0]
-
-            # Clean debit amount (col G = index 6)
             raw_amt = str(df.iloc[i, 6]).strip()
             raw_amt = raw_amt.replace("'", "").replace("-", "").replace(",", "")
             try:
                 amount = float(raw_amt)
             except:
                 amount = 0.0
-
-            # Search next 1-4 rows for NAME-ACCOUNTNUMBER (16-digit acct)
             cust_name = ""
             acct_num = ""
             for j in range(i + 1, min(i + 5, total_rows)):
@@ -90,36 +81,27 @@ def process_raw_deposits(df):
                         cust_name = name_acct[:dash_pos].strip()
                         acct_num = potential_acct
                         break
-
             records.append({
                 "Value Date": pd.to_datetime(value_date, errors="coerce"),
                 "Customer Name": cust_name,
                 "Account Number": acct_num,
                 "Debit Amt": amount
             })
-
     return pd.DataFrame(records)
 
 
 def process_raw_withdrawals(df):
-    """Extract Withdrawal rows from raw withdrawal CSV and return clean dataframe."""
     records = []
     total_rows = len(df)
-
     for i in range(total_rows - 1):
         cell_b = str(df.iloc[i, 1]).strip() if pd.notna(df.iloc[i, 1]) else ""
-
         if cell_b == "Withdrawal":
             value_date = df.iloc[i, 0]
-
-            # Credit amount (col H = index 7)
             raw_amt = df.iloc[i, 7]
             try:
                 amount = float(raw_amt)
             except:
                 amount = 0.0
-
-            # Search next 1-3 rows for NAME-ACCOUNTNUMBER (16-digit acct)
             cust_name = ""
             acct_num = ""
             for j in range(i + 1, min(i + 4, total_rows)):
@@ -131,7 +113,6 @@ def process_raw_withdrawals(df):
                         cust_name = name_acct[:dash_pos].strip()
                         acct_num = potential_acct
                         break
-
             if acct_num:
                 records.append({
                     "Value Date": pd.to_datetime(value_date, errors="coerce"),
@@ -139,12 +120,10 @@ def process_raw_withdrawals(df):
                     "Account Number": acct_num,
                     "Credit Amt": amount
                 })
-
     return pd.DataFrame(records)
 
 
 def count_working_days(start_date, end_date):
-    """Count working days (Mon-Fri) between two dates."""
     if pd.isna(start_date) or pd.isna(end_date):
         return None
     if start_date == end_date:
@@ -152,14 +131,13 @@ def count_working_days(start_date, end_date):
     count = 0
     current = start_date + timedelta(days=1)
     while current <= end_date:
-        if current.weekday() < 5:  # Mon=0 ... Fri=4
+        if current.weekday() < 5:
             count += 1
         current += timedelta(days=1)
     return count
 
 
 def match_original_logic(processed_deposits, processed_withdrawals):
-    """Original logic: any deposit within 14 calendar days of withdrawal."""
     merged = pd.merge(
         processed_deposits.rename(columns={"Value Date": "Deposit Date", "Debit Amt": "Deposit Amt"}),
         processed_withdrawals.rename(columns={"Value Date": "Withdrawal Date", "Credit Amt": "Withdrawal Amt"}),
@@ -168,13 +146,11 @@ def match_original_logic(processed_deposits, processed_withdrawals):
         suffixes=("_DEP", "_WIT")
     )
     merged["Days Between"] = (merged["Withdrawal Date"] - merged["Deposit Date"]).dt.days
-    # Keep only deposits that are on or before withdrawal date
     merged = merged[(merged["Deposit Date"] <= merged["Withdrawal Date"]) | merged["Deposit Date"].isna()]
     merged["Status"] = merged["Days Between"].apply(
         lambda x: "EARLY WITHDRAWAL" if pd.notnull(x) and x < 14 else
                   "Normal" if pd.notnull(x) else "No Match"
     )
-    # Use Customer Name from withdrawal side
     merged["Customer Name"] = merged["Customer Name_WIT"].combine_first(merged["Customer Name_DEP"])
     report_rows = []
     seen = set()
@@ -197,7 +173,6 @@ def match_original_logic(processed_deposits, processed_withdrawals):
 
 
 def match_macro_logic(processed_deposits, processed_withdrawals):
-    """Macro logic: most recent deposit before withdrawal, working days."""
     report_rows = []
     for _, wit_row in processed_withdrawals.iterrows():
         wit_acct = str(wit_row["Account Number"]).strip()
@@ -234,8 +209,24 @@ def match_macro_logic(processed_deposits, processed_withdrawals):
     return pd.DataFrame(report_rows)
 
 
+def highlight_status(row):
+    if row["Status"] == "EARLY WITHDRAWAL":
+        return ["background-color: #ffd6d6"] * len(row)
+    elif row["Status"] == "Normal":
+        return ["background-color: #d6f5d6"] * len(row)
+    else:
+        return ["background-color: #fff3cd"] * len(row)
+
+
+def to_excel_multi_sheet(sheets_dict):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in sheets_dict.items():
+            df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+    return output.getvalue()
+
+
 def to_excel_download(df):
-    """Convert dataframe to Excel bytes for download."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
@@ -248,23 +239,28 @@ def to_excel_download(df):
 
 st.markdown("### 📁 Upload Raw Files")
 
-col1, col2 = st.columns(2)
-with col1:
-    deposit_file = st.file_uploader("📥 Raw Deposits CSV", type=["csv", "xlsx"])
+deposit_file = st.file_uploader("📥 Raw Deposits CSV", type=["csv", "xlsx"])
 
-with col2:
-    two_files = st.toggle("Upload two withdrawal files?", value=False)
+st.markdown("#### 📤 Withdrawal Files")
+num_withdrawals = st.number_input(
+    "How many withdrawal files do you want to upload?",
+    min_value=1, max_value=20, value=1, step=1
+)
 
-if two_files:
-    wcol1, wcol2 = st.columns(2)
-    with wcol1:
-        withdrawal_file1 = st.file_uploader("📤 Raw Withdrawals CSV (File 1)", type=["csv", "xlsx"])
-    with wcol2:
-        withdrawal_file2 = st.file_uploader("📤 Raw Withdrawals CSV (File 2)", type=["csv", "xlsx"])
-    withdrawal_files = [f for f in [withdrawal_file1, withdrawal_file2] if f is not None]
-else:
-    withdrawal_file1 = st.file_uploader("📤 Raw Withdrawals CSV", type=["csv", "xlsx"])
-    withdrawal_files = [withdrawal_file1] if withdrawal_file1 else []
+withdrawal_files = []
+num_cols = min(int(num_withdrawals), 3)
+cols = st.columns(num_cols)
+for idx in range(int(num_withdrawals)):
+    col = cols[idx % num_cols]
+    with col:
+        wf = st.file_uploader(
+            f"📤 Withdrawal File {idx + 1}",
+            type=["csv", "xlsx"],
+            key=f"wit_file_{idx}"
+        )
+        withdrawal_files.append(wf)
+
+uploaded_withdrawal_files = [f for f in withdrawal_files if f is not None]
 
 st.divider()
 
@@ -272,14 +268,20 @@ st.divider()
 # PROCESSING
 # ==============================================================
 
-all_uploads_ready = deposit_file is not None and len(withdrawal_files) > 0
-if two_files:
-    all_uploads_ready = deposit_file is not None and len(withdrawal_files) == 2
+all_uploads_ready = (
+    deposit_file is not None and
+    len(uploaded_withdrawal_files) == int(num_withdrawals)
+)
+
+if deposit_file is not None and len(uploaded_withdrawal_files) < int(num_withdrawals):
+    st.info(f"⬆️ {len(uploaded_withdrawal_files)}/{int(num_withdrawals)} withdrawal file(s) uploaded. Please upload the remaining file(s) to begin.")
 
 if all_uploads_ready:
+    deposit_name = get_file_label(deposit_file)
+
     with st.spinner("Processing raw files..."):
 
-        # --- Read and process deposits ---
+        # Process deposits
         try:
             if deposit_file.name.endswith(".csv"):
                 raw_dep = pd.read_csv(deposit_file, header=None)
@@ -290,36 +292,42 @@ if all_uploads_ready:
             st.error(f"Error reading deposits file: {e}")
             st.stop()
 
-        # --- Read and process withdrawals (one or two files) ---
-        processed_list = []
-        for wf in withdrawal_files:
+        # Process each withdrawal file separately
+        withdrawal_results = []
+        for wf in uploaded_withdrawal_files:
             try:
                 if wf.name.endswith(".csv"):
                     raw_wit = pd.read_csv(wf, header=None)
                 else:
                     raw_wit = pd.read_excel(wf, header=None)
-                processed_list.append(process_raw_withdrawals(raw_wit))
+                processed_wit = process_raw_withdrawals(raw_wit)
+                withdrawal_results.append((get_file_label(wf), processed_wit))
             except Exception as e:
                 st.error(f"Error reading withdrawal file '{wf.name}': {e}")
                 st.stop()
 
-        processed_withdrawals = pd.concat(processed_list, ignore_index=True) if processed_list else pd.DataFrame()
+        # Combined withdrawals
+        processed_withdrawals = pd.concat(
+            [df for _, df in withdrawal_results], ignore_index=True
+        ) if withdrawal_results else pd.DataFrame()
 
-        # --- Match deposits to withdrawals using selected logic ---
-        if use_macro_logic:
-            report_df = match_macro_logic(processed_deposits, processed_withdrawals)
-        else:
-            report_df = match_original_logic(processed_deposits, processed_withdrawals)
+        # Generate report per withdrawal file
+        per_file_reports = {}
+        for wit_name, wit_df in withdrawal_results:
+            if use_macro_logic:
+                report = match_macro_logic(processed_deposits, wit_df)
+            else:
+                report = match_original_logic(processed_deposits, wit_df)
+            per_file_reports[wit_name] = report
 
-        # placeholder to keep indentation valid
-        pass
+        combined_report = pd.concat(per_file_reports.values(), ignore_index=True) if per_file_reports else pd.DataFrame()
 
     st.success("✅ Files processed successfully!")
 
-    # --- Summary metrics ---
-    early_count = len(report_df[report_df["Status"] == "EARLY WITHDRAWAL"])
-    normal_count = len(report_df[report_df["Status"] == "Normal"])
-    no_match_count = len(report_df[report_df["Status"] == "No Match"])
+    # Summary metrics
+    early_count = len(combined_report[combined_report["Status"] == "EARLY WITHDRAWAL"])
+    normal_count = len(combined_report[combined_report["Status"] == "Normal"])
+    no_match_count = len(combined_report[combined_report["Status"] == "No Match"])
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("📥 Deposits", len(processed_deposits))
@@ -333,72 +341,74 @@ if all_uploads_ready:
 
     st.divider()
 
-    # --- Processed Deposits ---
-    st.markdown('<div class="section-header">📥 Processed Deposits</div>', unsafe_allow_html=True)
+    # Processed Deposits (named after file)
+    st.markdown(f'<div class="section-header">📥 Processed Deposits — {deposit_name}</div>', unsafe_allow_html=True)
     st.dataframe(processed_deposits, use_container_width=True)
 
-    # --- Processed Withdrawals ---
-    st.markdown('<div class="section-header">📤 Processed Withdrawals</div>', unsafe_allow_html=True)
-    st.dataframe(processed_withdrawals, use_container_width=True)
-
-    # --- Full Report ---
-    st.markdown('<div class="section-header">📊 Full Early Withdrawal Report</div>', unsafe_allow_html=True)
-
-    def highlight_status(row):
-        if row["Status"] == "EARLY WITHDRAWAL":
-            return ["background-color: #ffd6d6"] * len(row)
-        elif row["Status"] == "Normal":
-            return ["background-color: #d6f5d6"] * len(row)
-        else:
-            return ["background-color: #fff3cd"] * len(row)
-
-    st.dataframe(report_df.style.apply(highlight_status, axis=1), use_container_width=True)
-
-    # --- Early Withdrawals only ---
-    early_df = report_df[report_df["Status"] == "EARLY WITHDRAWAL"]
-    st.markdown('<div class="section-header">⚠️ Early Withdrawals Only</div>', unsafe_allow_html=True)
-    if not early_df.empty:
-        st.dataframe(early_df, use_container_width=True)
-    else:
-        st.info("No early withdrawals found.")
+    # Processed Withdrawals (one section per file)
+    for wit_name, wit_df in withdrawal_results:
+        st.markdown(f'<div class="section-header">📤 Processed Withdrawals — {wit_name}</div>', unsafe_allow_html=True)
+        st.dataframe(wit_df, use_container_width=True)
 
     st.divider()
 
-    # --- Download buttons ---
-    st.markdown("### 📥 Download Reports")
-    dl1, dl2, dl3, dl4 = st.columns(4)
+    # Report per withdrawal file
+    st.markdown("### 📊 Early Withdrawal Reports")
+    for wit_name, report_df in per_file_reports.items():
+        st.markdown(
+            f'<div class="section-header">📊 {deposit_name} vs {wit_name}</div>',
+            unsafe_allow_html=True
+        )
+        early_df = report_df[report_df["Status"] == "EARLY WITHDRAWAL"]
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("⚠️ Early", len(early_df))
+        rc2.metric("✅ Normal", len(report_df[report_df["Status"] == "Normal"]))
+        rc3.metric("❓ No Match", len(report_df[report_df["Status"] == "No Match"]))
 
+        st.dataframe(report_df.style.apply(highlight_status, axis=1), use_container_width=True)
+
+        if not early_df.empty:
+            st.markdown(f"**⚠️ Early Withdrawals Only — {wit_name}**")
+            st.dataframe(early_df, use_container_width=True)
+        else:
+            st.info(f"No early withdrawals found for {wit_name}.")
+
+        st.divider()
+
+    # Download section
+    st.markdown("### 📥 Download Reports")
+
+    all_sheets = {}
+    all_sheets[f"Deposits - {deposit_name}"[:31]] = processed_deposits
+    for wit_name, wit_df in withdrawal_results:
+        all_sheets[f"Wit - {wit_name}"[:31]] = wit_df
+    for wit_name, report_df in per_file_reports.items():
+        all_sheets[f"Report - {wit_name}"[:31]] = report_df
+    all_early = combined_report[combined_report["Status"] == "EARLY WITHDRAWAL"]
+    all_sheets["All Early Withdrawals"] = all_early
+
+    dl1, dl2, dl3 = st.columns(3)
     with dl1:
         st.download_button(
-            label="📘 Full Report",
-            data=to_excel_download(report_df),
-            file_name="full_withdrawal_report.xlsx",
+            label="📘 Full Report (All Sheets)",
+            data=to_excel_multi_sheet(all_sheets),
+            file_name=f"withdrawal_report_{deposit_name}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     with dl2:
         st.download_button(
-            label="⚠️ Early Withdrawals",
-            data=to_excel_download(early_df),
-            file_name="early_withdrawals.xlsx",
+            label="⚠️ All Early Withdrawals",
+            data=to_excel_download(all_early),
+            file_name=f"early_withdrawals_{deposit_name}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     with dl3:
         st.download_button(
             label="📥 Processed Deposits",
             data=to_excel_download(processed_deposits),
-            file_name="processed_deposits.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    with dl4:
-        st.download_button(
-            label="📤 Processed Withdrawals",
-            data=to_excel_download(processed_withdrawals),
-            file_name="processed_withdrawals.xlsx",
+            file_name=f"processed_deposits_{deposit_name}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-else:
-    if two_files:
-        st.info("⬆️ Please upload your raw deposits file and both withdrawal files to begin.")
-    else:
-        st.info("⬆️ Please upload your raw deposits file and withdrawal file to begin.")
+elif deposit_file is None:
+    st.info("⬆️ Please upload your raw deposits file and withdrawal file(s) to begin.")
