@@ -41,6 +41,19 @@ st.markdown("Upload your **raw bank statement CSV files** — the app will proce
 
 st.divider()
 
+# --- Logic mode toggle ---
+st.markdown("### ⚙️ Matching Logic")
+lcol1, lcol2 = st.columns([1, 2])
+with lcol1:
+    use_macro_logic = st.toggle("Use Macro Logic (Working Days)", value=False)
+with lcol2:
+    if use_macro_logic:
+        st.info("🔧 **Macro Logic** — Matches withdrawal to the **most recent deposit** before it. Uses **working days** (excludes weekends). Early = ≤ 14 working days.")
+    else:
+        st.info("📄 **Original Logic** — Matches withdrawal to **any deposit** within 14 days. Uses **calendar days** (includes weekends). Early = < 14 calendar days.")
+
+st.divider()
+
 
 # ==============================================================
 # HELPER FUNCTIONS
@@ -145,6 +158,82 @@ def count_working_days(start_date, end_date):
     return count
 
 
+def match_original_logic(processed_deposits, processed_withdrawals):
+    """Original logic: any deposit within 14 calendar days of withdrawal."""
+    merged = pd.merge(
+        processed_deposits.rename(columns={"Value Date": "Deposit Date", "Debit Amt": "Deposit Amt"}),
+        processed_withdrawals.rename(columns={"Value Date": "Withdrawal Date", "Credit Amt": "Withdrawal Amt"}),
+        on="Account Number",
+        how="right",
+        suffixes=("_DEP", "_WIT")
+    )
+    merged["Days Between"] = (merged["Withdrawal Date"] - merged["Deposit Date"]).dt.days
+    # Keep only deposits that are on or before withdrawal date
+    merged = merged[(merged["Deposit Date"] <= merged["Withdrawal Date"]) | merged["Deposit Date"].isna()]
+    merged["Status"] = merged["Days Between"].apply(
+        lambda x: "EARLY WITHDRAWAL" if pd.notnull(x) and x < 14 else
+                  "Normal" if pd.notnull(x) else "No Match"
+    )
+    # Use Customer Name from withdrawal side
+    merged["Customer Name"] = merged["Customer Name_WIT"].combine_first(merged["Customer Name_DEP"])
+    report_rows = []
+    seen = set()
+    for _, row in merged.iterrows():
+        key = (str(row["Account Number"]), str(row["Withdrawal Date"]), str(row.get("Withdrawal Amt", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        report_rows.append({
+            "Withdrawal Date": row["Withdrawal Date"],
+            "Customer Name": row["Customer Name"],
+            "Account Number": row["Account Number"],
+            "Withdrawal Amt": row.get("Withdrawal Amt", None),
+            "Deposit Date": row.get("Deposit Date", None),
+            "Deposit Amt": row.get("Deposit Amt", None),
+            "Days Between": row.get("Days Between", None),
+            "Status": row["Status"]
+        })
+    return pd.DataFrame(report_rows)
+
+
+def match_macro_logic(processed_deposits, processed_withdrawals):
+    """Macro logic: most recent deposit before withdrawal, working days."""
+    report_rows = []
+    for _, wit_row in processed_withdrawals.iterrows():
+        wit_acct = str(wit_row["Account Number"]).strip()
+        wit_date = wit_row["Value Date"]
+        matching_deps = processed_deposits[
+            (processed_deposits["Account Number"] == wit_acct) &
+            (processed_deposits["Value Date"] <= wit_date)
+        ]
+        if not matching_deps.empty:
+            best_dep = matching_deps.loc[matching_deps["Value Date"].idxmax()]
+            working_days = count_working_days(best_dep["Value Date"], wit_date)
+            status = "EARLY WITHDRAWAL" if (working_days is not None and working_days <= 14) else "Normal"
+            report_rows.append({
+                "Withdrawal Date": wit_date,
+                "Customer Name": wit_row["Customer Name"],
+                "Account Number": wit_acct,
+                "Withdrawal Amt": wit_row["Credit Amt"],
+                "Deposit Date": best_dep["Value Date"],
+                "Deposit Amt": best_dep["Debit Amt"],
+                "Days Between": working_days,
+                "Status": status
+            })
+        else:
+            report_rows.append({
+                "Withdrawal Date": wit_date,
+                "Customer Name": wit_row["Customer Name"],
+                "Account Number": wit_acct,
+                "Withdrawal Amt": wit_row["Credit Amt"],
+                "Deposit Date": None,
+                "Deposit Amt": None,
+                "Days Between": None,
+                "Status": "No Match"
+            })
+    return pd.DataFrame(report_rows)
+
+
 def to_excel_download(df):
     """Convert dataframe to Excel bytes for download."""
     output = BytesIO()
@@ -216,50 +305,14 @@ if all_uploads_ready:
 
         processed_withdrawals = pd.concat(processed_list, ignore_index=True) if processed_list else pd.DataFrame()
 
-        # --- Match deposits to withdrawals ---
-        report_rows = []
+        # --- Match deposits to withdrawals using selected logic ---
+        if use_macro_logic:
+            report_df = match_macro_logic(processed_deposits, processed_withdrawals)
+        else:
+            report_df = match_original_logic(processed_deposits, processed_withdrawals)
 
-        for _, wit_row in processed_withdrawals.iterrows():
-            wit_acct = str(wit_row["Account Number"]).strip()
-            wit_date = wit_row["Value Date"]
-
-            # Find most recent deposit on or before withdrawal date for same account
-            matching_deps = processed_deposits[
-                (processed_deposits["Account Number"] == wit_acct) &
-                (processed_deposits["Value Date"] <= wit_date)
-            ]
-
-            if not matching_deps.empty:
-                best_dep = matching_deps.loc[matching_deps["Value Date"].idxmax()]
-                working_days = count_working_days(best_dep["Value Date"], wit_date)
-                if working_days is not None and working_days <= 14:
-                    status = "EARLY WITHDRAWAL"
-                else:
-                    status = "Normal"
-
-                report_rows.append({
-                    "Withdrawal Date": wit_date,
-                    "Customer Name": wit_row["Customer Name"],
-                    "Account Number": wit_acct,
-                    "Withdrawal Amt": wit_row["Credit Amt"],
-                    "Deposit Date": best_dep["Value Date"],
-                    "Deposit Amt": best_dep["Debit Amt"],
-                    "Working Days": working_days,
-                    "Status": status
-                })
-            else:
-                report_rows.append({
-                    "Withdrawal Date": wit_date,
-                    "Customer Name": wit_row["Customer Name"],
-                    "Account Number": wit_acct,
-                    "Withdrawal Amt": wit_row["Credit Amt"],
-                    "Deposit Date": None,
-                    "Deposit Amt": None,
-                    "Working Days": None,
-                    "Status": "No Match"
-                })
-
-        report_df = pd.DataFrame(report_rows)
+        # placeholder to keep indentation valid
+        pass
 
     st.success("✅ Files processed successfully!")
 
@@ -274,6 +327,9 @@ if all_uploads_ready:
     m3.metric("⚠️ Early Withdrawals", early_count)
     m4.metric("✅ Normal", normal_count)
     m5.metric("❓ No Match", no_match_count)
+
+    days_label = "Working Days" if use_macro_logic else "Calendar Days"
+    st.caption(f"ℹ️ Using **{'Macro Logic (Working Days)' if use_macro_logic else 'Original Logic (Calendar Days)'}** — Days Between column shows {days_label}.")
 
     st.divider()
 
